@@ -32,14 +32,14 @@ def parse_korean_cap(val_str):
 
 def calculate_nxt_kospi():
     try:
-        # 1. 최근 2일치 코스피 종가 데이터 가져오기 (pageSize=2)
-        kospi_url = "https://m.stock.naver.com/api/index/KOSPI/price?pageSize=2"
+        # 1. 최근 250일치 코스피 종가 데이터 가져오기 (pageSize=250으로 확장)
+        kospi_url = "https://m.stock.naver.com/api/index/KOSPI/price?pageSize=250"
         kospi_data = requests.get(kospi_url, headers=headers).json()
-        kospi_latest = float(kospi_data[0]['closePrice'].replace(',', ''))  # 가장 최근 거래일 종가 (예: 금요일)
-        kospi_previous = float(kospi_data[1]['closePrice'].replace(',', '')) # 그 전 거래일 종가 (예: 목요일)
+        
+        kospi_latest = float(kospi_data[0]['closePrice'].replace(',', ''))  # 가장 최근 거래일 종가
+        kospi_previous = float(kospi_data[1]['closePrice'].replace(',', '')) # 그 전 거래일 종가
 
-        # 2. 기준일 자동 판별 알고리즘 (삼성전자를 앵커로 활용)
-        # 현재 NXT 등락률이 '가장 최근 종가' 기준인지 '그 전 거래일 종가' 기준인지 역산하여 찾아냅니다.
+        # 2. 기준일 자동 판별 알고리즘 (NXT 등락률 기준가 역산)
         anchor_url = "https://m.stock.naver.com/api/stock/005930/basic"
         anchor_res = requests.get(anchor_url, headers=headers).json()
         
@@ -52,16 +52,21 @@ def calculate_nxt_kospi():
             nxt_return = float(over_info['fluctuationsRatio']) / 100
             
             if nxt_return != -1.0:
-                # 등락률 공식으로 역산한 기준가
                 calculated_base_price = nxt_price / (1 + nxt_return)
-                
-                # 역산한 기준가가 현재 정규장 종가와 차이가 크다면, 
-                # 현재 NXT가 '전일 종가(목요일)'를 기준으로 계산 중인 상태(주말/장마감 세션)임을 의미합니다.
                 if abs(calculated_base_price - krx_close) > (krx_close * 0.01):
                     use_previous_kospi = True
 
-        # 최종 매칭할 코스피 기준 지수 결정
-        base_kospi = kospi_previous if use_previous_kospi else kospi_latest
+        # 최종 매칭할 코스피 기준 지수 및 날짜 결정
+        if use_previous_kospi:
+            base_kospi = kospi_previous
+            base_date_raw = kospi_data[1]['localTradedAt']
+        else:
+            base_kospi = kospi_latest
+            base_date_raw = kospi_data[0]['localTradedAt']
+
+        # 기준 날짜 포맷팅 (YYYY-MM-DD -> YYYY년MM월DD일)
+        date_parts = base_date_raw.split('-')
+        formatted_base_date = f"{date_parts[0]}년{date_parts[1]}월{date_parts[2]}일"
 
         # 3. 10개 종목 데이터 수집 및 계산
         stock_data_list = []
@@ -102,16 +107,51 @@ def calculate_nxt_kospi():
             if s['has_nxt']:
                 stock_details += f"🔹 {s['name']}: {s['nxt_return']*100:+.2f}%\n"
 
-        # 산출된 가중 등락률을 알맞은 기준 코스피 지수에 적용
+        # NXT 예상 지수 산출
         nxt_kospi = base_kospi * (1 + total_weighted_return)
         change_percent = total_weighted_return * 100
 
-        # 결과 메시지 양식
+        # 4. [신규 기능] 250일 최고가 및 실시간 MDD 동적 계산
+        historical_prices = [float(item['closePrice'].replace(',', '')) for item in reversed(kospi_data)]
+        all_prices = historical_prices + [nxt_kospi]  # 과거 데이터 끝에 현재 예상 지수 병합
+
+        # 250일 최고가 및 해당 날짜 검색
+        peak_price = 0.0
+        peak_date = ""
+        for item in kospi_data:
+            p = float(item['closePrice'].replace(',', ''))
+            if p > peak_price:
+                peak_price = p
+                peak_date = item['localTradedAt']
+
+        # 만약 현재 NXT 예상 지수가 250일 전고점을 돌파했다면 업데이트
+        if nxt_kospi > peak_price:
+            peak_price = nxt_kospi
+            formatted_peak_date = " [현재(NXT)]"
+        else:
+            p_parts = peak_date.split('-')
+            formatted_peak_date = f" [{p_parts[0]}년{p_parts[1]}월{p_parts[2]}일]"
+
+        # 시계열 기반 고점 대비 최대 낙폭(MDD) 계산
+        max_dd = 0.0
+        current_peak = 0.0
+        for price in all_prices:
+            if price > current_peak:
+                current_peak = price
+            if current_peak > 0:
+                dd = (price - current_peak) / current_peak
+                if dd < max_dd:
+                    max_dd = dd
+        mdd_percent = max_dd * 100
+
+        # 요청하신 형태로 브리핑 문구 조립
         msg = (
             f"📊 [NXT 기반 코스피 예상 지수]\n\n"
-            f"▪️ 기준 정규장 종가: {base_kospi:,.2f}\n"
+            f"▪️ [{formatted_base_date}] 기준 정규장 종가: {base_kospi:,.2f}\n"
             f"▪️ 현재 NXT 예상 지수: {nxt_kospi:,.2f}\n"
-            f"▪️ 예상 변동률: {change_percent:+.2f}%\n\n"
+            f"▪️ 예상 변동률: {change_percent:+.2f}%\n"
+            f"▪️ 250일 최고가 : {peak_price:,.2f}{formatted_peak_date}\n"
+            f"▪️ MDD : {mdd_percent:.2f}%\n\n"
             f"🔥 [NXT 주요 변동 종목]\n"
             f"{stock_details if stock_details else '움직임이 있는 대형주가 없습니다.'}"
         )
