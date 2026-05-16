@@ -32,19 +32,44 @@ def parse_korean_cap(val_str):
 
 def calculate_nxt_kospi():
     try:
-        kospi_url = "https://m.stock.naver.com/api/index/KOSPI/price?pageSize=1"
+        # 1. 최근 2일치 코스피 종가 데이터 가져오기 (pageSize=2)
+        kospi_url = "https://m.stock.naver.com/api/index/KOSPI/price?pageSize=2"
         kospi_data = requests.get(kospi_url, headers=headers).json()
-        prev_kospi = float(kospi_data[0]['closePrice'].replace(',', ''))
+        kospi_latest = float(kospi_data[0]['closePrice'].replace(',', ''))  # 가장 최근 거래일 종가 (예: 금요일)
+        kospi_previous = float(kospi_data[1]['closePrice'].replace(',', '')) # 그 전 거래일 종가 (예: 목요일)
 
+        # 2. 기준일 자동 판별 알고리즘 (삼성전자를 앵커로 활용)
+        # 현재 NXT 등락률이 '가장 최근 종가' 기준인지 '그 전 거래일 종가' 기준인지 역산하여 찾아냅니다.
+        anchor_url = "https://m.stock.naver.com/api/stock/005930/basic"
+        anchor_res = requests.get(anchor_url, headers=headers).json()
+        
+        krx_close = float(str(anchor_res.get('closePrice', '0')).replace(',', ''))
+        over_info = anchor_res.get('overMarketPriceInfo')
+        
+        use_previous_kospi = False
+        if over_info and over_info.get('overPrice'):
+            nxt_price = float(str(over_info['overPrice']).replace(',', ''))
+            nxt_return = float(over_info['fluctuationsRatio']) / 100
+            
+            if nxt_return != -1.0:
+                # 등락률 공식으로 역산한 기준가
+                calculated_base_price = nxt_price / (1 + nxt_return)
+                
+                # 역산한 기준가가 현재 정규장 종가와 차이가 크다면, 
+                # 현재 NXT가 '전일 종가(목요일)'를 기준으로 계산 중인 상태(주말/장마감 세션)임을 의미합니다.
+                if abs(calculated_base_price - krx_close) > (krx_close * 0.01):
+                    use_previous_kospi = True
+
+        # 최종 매칭할 코스피 기준 지수 결정
+        base_kospi = kospi_previous if use_previous_kospi else kospi_latest
+
+        # 3. 10개 종목 데이터 수집 및 계산
         stock_data_list = []
         total_market_cap = 0
 
         for code, name in TOP_10_STOCKS.items():
             url = f"https://m.stock.naver.com/api/stock/{code}/basic"
             res = requests.get(url, headers=headers).json()
-            
-            raw_close = res.get('closePrice', '0')
-            krx_close = float(str(raw_close).replace(',', '')) if raw_close else 0.0
             
             if 'marketCap' in res and res['marketCap']:
                 market_cap = float(res['marketCap'])
@@ -57,17 +82,14 @@ def calculate_nxt_kospi():
             
             over_info = res.get('overMarketPriceInfo')
             if over_info and over_info.get('overPrice'):
-                nxt_price = float(str(over_info['overPrice']).replace(',', ''))
                 nxt_return = float(over_info['fluctuationsRatio']) / 100
                 has_nxt = True
             else:
-                nxt_price = krx_close
                 nxt_return = 0.0
                 has_nxt = False
                 
             stock_data_list.append({
-                "name": name, "market_cap": market_cap, "krx_close": krx_close,
-                "nxt_price": nxt_price, "nxt_return": nxt_return, "has_nxt": has_nxt
+                "name": name, "market_cap": market_cap, "nxt_return": nxt_return, "has_nxt": has_nxt
             })
 
         total_weighted_return = 0.0
@@ -80,12 +102,14 @@ def calculate_nxt_kospi():
             if s['has_nxt']:
                 stock_details += f"🔹 {s['name']}: {s['nxt_return']*100:+.2f}%\n"
 
-        nxt_kospi = prev_kospi * (1 + total_weighted_return)
+        # 산출된 가중 등락률을 알맞은 기준 코스피 지수에 적용
+        nxt_kospi = base_kospi * (1 + total_weighted_return)
         change_percent = total_weighted_return * 100
 
+        # 결과 메시지 양식
         msg = (
             f"📊 [NXT 기반 코스피 예상 지수]\n\n"
-            f"▪️ KRX 정규장 종가: {prev_kospi:,.2f}\n"
+            f"▪️ 기준 정규장 종가: {base_kospi:,.2f}\n"
             f"▪️ 현재 NXT 예상 지수: {nxt_kospi:,.2f}\n"
             f"▪️ 예상 변동률: {change_percent:+.2f}%\n\n"
             f"🔥 [NXT 주요 변동 종목]\n"
