@@ -47,10 +47,10 @@ def calculate_nxt_kospi():
         if not kospi_data:
             return "❌ 코스피 과거 데이터를 가져오지 못했습니다."
 
-        kospi_latest = float(kospi_data[0]['closePrice'].replace(',', ''))  # 가장 최근 거래일 종가
-        kospi_previous = float(kospi_data[1]['closePrice'].replace(',', '')) # 그 전 거래일 종가
+        kospi_latest = float(kospi_data[0]['closePrice'].replace(',', ''))
+        kospi_previous = float(kospi_data[1]['closePrice'].replace(',', ''))
 
-        # 2. 기준일 자동 판별 알고리즘 (NXT 등락률 기준가 역산)
+        # 2. 기준일 자동 판별 알고리즘 (삼성전자 NXT 등락률 기준가 역산)
         anchor_url = "https://m.stock.naver.com/api/stock/005930/basic"
         anchor_res = requests.get(anchor_url, headers=headers).json()
         
@@ -67,7 +67,6 @@ def calculate_nxt_kospi():
                 if abs(calculated_base_price - krx_close) > (krx_close * 0.01):
                     use_previous_kospi = True
 
-        # 최종 매칭할 코스피 기준 지수 및 날짜 결정
         if use_previous_kospi:
             base_kospi = kospi_previous
             base_date_raw = kospi_data[1]['localTradedAt']
@@ -75,28 +74,32 @@ def calculate_nxt_kospi():
             base_kospi = kospi_latest
             base_date_raw = kospi_data[0]['localTradedAt']
 
-        # 기준 날짜 포맷팅 (YYYY-MM-DD -> YYYY년MM월DD일)
         date_parts = base_date_raw.split('-')
         formatted_base_date = f"{date_parts[0]}년{date_parts[1]}월{date_parts[2]}일"
 
-        # 3. 10개 종목 데이터 수집 및 계산
+        # 3. 10개 종목 데이터 수집 및 계산 (교차 검증 하이브리드 파싱)
         stock_data_list = []
         total_market_cap = 0
 
         for code, name in TOP_10_STOCKS.items():
-            url = f"https://m.stock.naver.com/api/stock/{code}/basic"
-            res = requests.get(url, headers=headers).json()
+            # [A] 시가총액은 정확한 정보가 있는 integration API에서 가져옵니다.
+            int_url = f"https://m.stock.naver.com/api/stock/{code}/integration"
+            int_res = requests.get(int_url, headers=headers).json()
             
-            if 'marketCap' in res and res['marketCap']:
-                market_cap = float(res['marketCap'])
-            elif 'marketValue' in res and res['marketValue']:
-                market_cap = parse_korean_cap(res['marketValue'])
-            else:
-                market_cap = 1.0
-                
+            market_cap = 1.0
+            total_infos = int_res.get('totalInfos', [])
+            for info in total_infos:
+                if info.get('code') == 'marketValue':
+                    market_cap = parse_korean_cap(info.get('value', ''))
+                    break
+            
             total_market_cap += market_cap
             
-            over_info = res.get('overMarketPriceInfo')
+            # [B] NXT 가격 및 장외 정보는 basic API에서 가져옵니다.
+            basic_url = f"https://m.stock.naver.com/api/stock/{code}/basic"
+            basic_res = requests.get(basic_url, headers=headers).json()
+            
+            over_info = basic_res.get('overMarketPriceInfo')
             if over_info and over_info.get('overPrice'):
                 nxt_return = float(over_info['fluctuationsRatio']) / 100
                 has_nxt = True
@@ -111,7 +114,6 @@ def calculate_nxt_kospi():
         total_weighted_return = 0.0
         stock_details = ""
         
-        # 각 종목의 가중치를 계산하고 텍스트에 [가중치 XX.X%] 추가
         for s in stock_data_list:
             weight = s['market_cap'] / total_market_cap if total_market_cap else 0.0
             total_weighted_return += s['nxt_return'] * weight
@@ -119,7 +121,6 @@ def calculate_nxt_kospi():
             if s['has_nxt']:
                 stock_details += f"🔹 {s['name']}: {s['nxt_return']*100:+.2f}% [가중치 {weight*100:.1f}%]\n"
 
-        # NXT 예상 지수 산출
         nxt_kospi = base_kospi * (1 + total_weighted_return)
         change_percent = total_weighted_return * 100
 
@@ -153,7 +154,6 @@ def calculate_nxt_kospi():
                     max_dd = dd
         mdd_percent = max_dd * 100
 
-        # 결과 메시지 조립
         msg = (
             f"📊 [NXT 기반 코스피 예상 지수]\n\n"
             f"▪️ [{formatted_base_date}] 기준 정규장 종가: {base_kospi:,.2f}\n"
