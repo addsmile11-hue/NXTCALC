@@ -32,10 +32,21 @@ def parse_korean_cap(val_str):
 
 def calculate_nxt_kospi():
     try:
-        # 1. 최근 250일치 코스피 종가 데이터 가져오기 (pageSize=250으로 확장)
-        kospi_url = "https://m.stock.naver.com/api/index/KOSPI/price?pageSize=250"
-        kospi_data = requests.get(kospi_url, headers=headers).json()
-        
+        # 1. 코스피 종가 데이터 가져오기 (50개씩 5번 나누어 총 250일치 수집)
+        kospi_data = []
+        for page in range(1, 6):
+            url = f"https://m.stock.naver.com/api/index/KOSPI/price?pageSize=50&page={page}"
+            res = requests.get(url, headers=headers)
+            if res.status_code != 200:
+                continue
+            page_data = res.json()
+            if not page_data or not isinstance(page_data, list):
+                break
+            kospi_data.extend(page_data)
+
+        if not kospi_data:
+            return "❌ 코스피 과거 데이터를 가져오지 못했습니다."
+
         kospi_latest = float(kospi_data[0]['closePrice'].replace(',', ''))  # 가장 최근 거래일 종가
         kospi_previous = float(kospi_data[1]['closePrice'].replace(',', '')) # 그 전 거래일 종가
 
@@ -100,22 +111,22 @@ def calculate_nxt_kospi():
         total_weighted_return = 0.0
         stock_details = ""
         
+        # 각 종목의 가중치를 계산하고 텍스트에 [가중치 XX.X%] 추가
         for s in stock_data_list:
             weight = s['market_cap'] / total_market_cap if total_market_cap else 0.0
             total_weighted_return += s['nxt_return'] * weight
             
             if s['has_nxt']:
-                stock_details += f"🔹 {s['name']}: {s['nxt_return']*100:+.2f}%\n"
+                stock_details += f"🔹 {s['name']}: {s['nxt_return']*100:+.2f}% [가중치 {weight*100:.1f}%]\n"
 
         # NXT 예상 지수 산출
         nxt_kospi = base_kospi * (1 + total_weighted_return)
         change_percent = total_weighted_return * 100
 
-        # 4. [신규 기능] 250일 최고가 및 실시간 MDD 동적 계산
+        # 4. 250일 최고가 및 실시간 MDD 동적 계산
         historical_prices = [float(item['closePrice'].replace(',', '')) for item in reversed(kospi_data)]
-        all_prices = historical_prices + [nxt_kospi]  # 과거 데이터 끝에 현재 예상 지수 병합
+        all_prices = historical_prices + [nxt_kospi]
 
-        # 250일 최고가 및 해당 날짜 검색
         peak_price = 0.0
         peak_date = ""
         for item in kospi_data:
@@ -124,7 +135,6 @@ def calculate_nxt_kospi():
                 peak_price = p
                 peak_date = item['localTradedAt']
 
-        # 만약 현재 NXT 예상 지수가 250일 전고점을 돌파했다면 업데이트
         if nxt_kospi > peak_price:
             peak_price = nxt_kospi
             formatted_peak_date = " [현재(NXT)]"
@@ -132,7 +142,6 @@ def calculate_nxt_kospi():
             p_parts = peak_date.split('-')
             formatted_peak_date = f" [{p_parts[0]}년{p_parts[1]}월{p_parts[2]}일]"
 
-        # 시계열 기반 고점 대비 최대 낙폭(MDD) 계산
         max_dd = 0.0
         current_peak = 0.0
         for price in all_prices:
@@ -144,7 +153,7 @@ def calculate_nxt_kospi():
                     max_dd = dd
         mdd_percent = max_dd * 100
 
-        # 요청하신 형태로 브리핑 문구 조립
+        # 결과 메시지 조립
         msg = (
             f"📊 [NXT 기반 코스피 예상 지수]\n\n"
             f"▪️ [{formatted_base_date}] 기준 정규장 종가: {base_kospi:,.2f}\n"
